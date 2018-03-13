@@ -129,8 +129,8 @@ class ModelMetaclass(type):
 			#Model是所有类的父类，不需要实例化，也不需要根据输入有所变动（有点像java里的抽象类
 			return type.__new__(cls,name,bases,attrs)
 		#创建类的时候要得到table的名称，不同的类对应的table不一样，同时新的类（生产出来的）里也需要有tablename
-		tablename = attrs['__tablename__']
-		logging.info('found mode: %s (table: %s' %(name,tablename))
+		tablename = attrs['__table__']
+		logging.info('found mode: %s (table: %s)' %(name,tablename))
 		#新的类还有传递过来的各种参数，主键等信息是存储在User的属性类里的，现在要把他们转换出来
 		mappings = dict()
 		fields = []
@@ -254,17 +254,18 @@ class Model(dict,metaclass=ModelMetaclass):
 		r = await execute(self.__delete__,primarykey)
 		if r != 1:
 			logging.info('failed to delete into table: %s wiht %s'%(self.__table__,self.__primary_key__))
-#test
+'''
 class User(Model):
 	__tablename__ = 'user'
 
 	id = StringField(primarykey=True)
 	name = StringField()
+'''
 
 if __name__=='__main__':
 	user = User(id='6',name='mariah')
 	loop = asyncio.get_event_loop()
-	loop.run_until_complete(create_pool(user='sa',password='5h6je63q',db='blogs',loop=loop))
+	loop.run_until_complete(create_pool(user='sa',password='******',db='blogs',loop=loop))
 	#loop.run_until_complete(select(user.__insert__,args))
 	#print(loop.run_until_complete(user.save()))
 	print(loop.run_until_complete(User.findName('name')))
