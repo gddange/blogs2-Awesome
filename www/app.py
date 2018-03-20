@@ -3,11 +3,14 @@
 #这是服务器的首页，即为生成服务web.app的地方
 
 import logging;logging.basicConfig(level=logging.INFO)
-import asyncio,os
-import orm,handler
+import asyncio,os,time,json
+import orm
+from handler import COOKIE_NAME,cookie2user
+from models import User
 from jinja2 import Environment,FileSystemLoader
 from aiohttp import web
 from coroweb import get,add_routes,add_static
+from config import configs
 
 #初始化jinja2模板
 def init_jinja2(app,**kw):
@@ -38,6 +41,23 @@ async def logger_factory(app,handler):
 		logging.info('Request: %s %s' %(request.method,request.path))
 		return (await handler(request))
 	return logger
+
+#解析cookie将登陆用户绑定到request对象的拦截器
+async def auth_factory(app,handler):
+	async def auth(request):
+		logging.info('check user: %s %s' %(request.method,request.path))
+		#设置新的属性__user__
+		request.__user__ = None
+		#已经import handler，同样的COOKIE_NAME就可以拿到
+		cookie_str = request.cookies.get(COOKIE_NAME)
+		if cookie_str:
+			#从cookie_str中拿到用户名
+			user = await cookie2user(cookie_str)
+			if user:
+				logging.info('set current user: %s' %user.email)
+				request.__user__ = user
+		return (await handler(request))
+	return auth
 
 #这里解析的是request里的数据
 async def data_factory(app,handler):
@@ -78,7 +98,7 @@ async def response_factory(app,handler):
 				resp.content_type = 'application/json;charset=utf-8'
 				return resp
 			else:
-				resp = web.Response(body = app['__templating__']).get_template(template).render(**r).encode('utf-8')
+				resp = web.Response(body = app['__templating__'].get_template(template).render(**r).encode('utf-8'))
 				resp.content_type = 'text/html;charset=utf-8'
 				return resp
 		if isinstance(r,int) and r >= 100 and r<600:
@@ -93,7 +113,7 @@ async def response_factory(app,handler):
 		return resp
 	return response
 
-async def datetime_filter(t):
+def datetime_filter(t):
 	delta = int(time.time() - t)
 	if delta <60:
 		return u'1分钟前'
@@ -107,8 +127,8 @@ async def datetime_filter(t):
 	return u'%s年%s月%s日' %(dt.year,dt.month,dt.day)
 
 async def init(loop):
-	await orm.create_pool(loop = loop,user = 'sa',password='******',db='blogs')
-	app = web.Application(loop = loop,middlewares=[logger_factory,response_factory])
+	await orm.create_pool(loop = loop,**configs.db)
+	app = web.Application(loop = loop,middlewares=[logger_factory,auth_factory,response_factory])
 	init_jinja2(app,filters=dict(datetime = datetime_filter))
 	add_routes(app,'handler')
 	add_static(app)
