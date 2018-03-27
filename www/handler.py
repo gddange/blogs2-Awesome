@@ -1,15 +1,37 @@
 #-*- coding:utf-8 -*-
 
 from models import User,Blog,Comment,next_id
+import markdown2
 from aiohttp import web
 from coroweb import get,post
 import time,re,hashlib,json,logging,base64,asyncio
-from apis import APIError,APIValueError
+from apis import APIError,APIValueError,APIPermissionError,Page
 from config import configs
 
 
 COOKIE_NAME = 'awesession'
 _COOKIE_KEY=configs.session.secret
+
+def check_admin(request):
+	user = request.__user__
+	if user is None or not user.admin:
+		raise APIPermissionError()
+
+def text2html(text):
+	lines = map(lambda s:'<p>%s</p>' %s.replace('&','&amp;').replace('<','&lt').replace('>','&gt'),filter(lambda s: s.strip() != '',text.split('\n')))
+	return ''.join(lines)
+
+#返回博文管理最下面的那个索引
+def get_page_index(page_str):
+	p = 1
+	try:
+		p = int(page_str)
+	except ValueError as e:
+		pass
+	if p < 1:
+		p = 1
+	return p
+
 #Cookie生成函数，cookie中存储了用户id,cookie过期时间，以及用户id,passwd、cookie_str和max-age计算出来的单向验证字符串sha1
 def user2cookie(user,max_age):
 	#expires表示cookie过期的时间
@@ -46,15 +68,18 @@ async def cookie2user(cookie_str):
 		return None
 
 @get('/')
-async def index(request):
-	summary='He lived alone in his house in Saville Row,whither none penetrated.A single domestic sufficed to save him.He breakfasted and dined at club,at hours mathematically fixed,in the same room,at the table,never taking his meals with other memebers, muck less bringing a guest with him;'
-	blogs=[
-	    Blog(id='1',name='Test blog', summary=summary,created_at=time.time()-120),
-	    Blog(id='2',name='Something new',summary=summary,created_at=time.time()-3600),
-	    Blog(id='3',name='Learn Swift',summary=summary,created_at=time.time()-7200)
-	]
+async def index(*,page='1',request):
+	#从数据库里取出博客
+	page_index = get_page_index(page)
+	num = await Blog.findNumber('count(id)')
+	page = Page(num)
+	if num == 0:
+		blogs = []
+	else:
+		blogs = await Blog.findAll(orderBy='created_at',limit=(page.offset,page.limit))
 	return{
 	    '__template__':'blogs.html',
+	    'page':page,
 	    'blogs':blogs,
 	    'user':request.__user__
 	}
@@ -79,6 +104,7 @@ def signout(request):
 	r.set_cookie(COOKIE_NAME,'-delete-',max_age=0,httponly=True)
 	logging.info('user signed out.')
 	return r
+
 
 #^表示匹配字符串开头，如果是[^a]则表示取反，即不取这个字符'[]'表示字符集，'$'表示匹配字符末尾'{m,n}'：匹配前一个字符m至n次
 _RE_EMAIL = re.compile(r'^[a-z0-9\.\-\_]+\@[a-z0-9\-\_]+(\.[a-z0-9\-\_]+){1,4}$')
@@ -140,3 +166,173 @@ async def authenticate(*,email,passwd):
 	#json.dumps把python数据结构转换为json格式，json.load把json编码的字符串转换为python数据结构
 	r.body=json.dumps(user,ensure_ascii = False).encode('utf-8')
 	return r
+
+#根据博客ID从数据库中查询该博客的评论
+@get('/blog/{id}')
+async def get_blog(id,request):
+	blog = await Blog.find(id)
+	comments = await Comment.findAll('blog_id=%s',[id],orderBy="created_at")
+	for c in comments:
+		c.html_content = text2html(c.content)
+	blog.html_content = markdown2.markdown(blog.content)
+	return {
+	    '__template__':'blog.html',
+	    'blog':blog,
+	    'comments':comments,
+	    'user':request.__user__
+	}
+
+#博客分页管理函数
+@get('/manage/blogs')
+def manage_blogs(*,page='1',request):
+	return {
+	    '__template__':'manage_blogs.html',
+	    'page_index':get_page_index(page),
+	    'user':request.__user__
+	}
+
+#对已有的博客进行编辑并保存
+@get('/manage/blogs/edit')
+def manage_edit_blog_by_id(id,request):
+	print('the id of this blog is %s'%id)
+	return {
+	    '__template__':'manage_blog_edit.html',
+	    'id':id,
+	    'action':'/api/blogs/%s' %id,
+	    'user':request.__user__
+	}
+
+#创建博客
+@get('/manage/blogs/create')
+def manage_create_blog(request):
+	return {
+	    '__template__':'manage_blog_edit.html',
+	    'id':'',
+	    'action':'/api/blogs',
+	    'user':request.__user__
+	}
+
+#转到分页管理评论页面
+@get('/manage/comments')
+def manage_comments(*,page='1',request):
+	return{
+	    '__template__':'manage_comments.html',
+	    'page_index':get_page_index(page),
+	    'user':request.__user__
+	}
+
+#转到分页管理用户页面
+@get('/manage/users')
+def manage_users(*,page='1',request):
+	return{
+	    '__template__':'manage_users.html',
+	    'page_index':get_page_index(page),
+	    'user':request.__user__
+	}
+
+#创建blog，当点击保存之后将blog存到数据库中
+@post('/api/blogs')
+async def api_create_blog(request,*,name,summary,content):
+	#检查是否是管理员，只有管理员才可以创建博客
+	check_admin(request)
+	if not name or not name.strip():
+		raise APIValueError('name','name cannot be empty.')
+	if not summary or not summary.strip():
+		raise APIValueError('summary','summary cannot be empty.')
+	if not content or not content.strip():
+		raise APIValueError('content','content cannot be empty.')
+	#因为在orm里面，save就包括了update，所以此处不用判断博文是否已经存在
+	blog = Blog(user_id = request.__user__.id,user_name=request.__user__.name,user_image=request.__user__.image,name=name.strip(),summary=summary.strip(),content=content.strip())
+	await blog.save()
+	return blog
+
+#更新保存博客
+@post('/api/blogs/{id}')
+async def api_update_blog(id,request,*,name,summary,content):
+	check_admin(request)
+	blog = await Blog.findAll('id=%s',[id])
+	if not name or not name.strip():
+		raise APIValueError('name','name cannot be empty.')
+	if not summary or not summary.strip():
+		raise APIValueError('summary','summary cannot be empty.')
+	if not content or not content.strip():
+		raise APIValueError('conetnt','content cannot be empty.')
+	blog[0].name = name
+	blog[0].summary = summary
+	blog[0].content = content
+	await blog[0].update()
+	return blog[0]
+
+#根据id删除博客
+@post('/api/blogs/{id}/delete')
+async def api_delete_blog(id,request):
+	check_admin(request)
+	blogs = await Blog.findAll('id=%s',[id])
+	if len(blogs) ==0:
+		return None
+	blog = blogs[0]
+	await blog.delete()
+	return dict(id=id)
+
+#创建保存评论
+@post('/api/blogs/{blog_id}/comments')
+async def create_blog_comments(blog_id,request,*,content):
+	#所有人都可以评论，因此不需要检查用户的类型
+	if not blog_id or not blog_id.strip():
+		raise APIValueError('blog.id','blog.id cannot be empty.')
+	if not content or not content.strip():
+		raise APIValueError('content','content cannot be empty.')
+	comment = Comment(blog_id = blog_id,user_id = request.__user__.id,user_name = request.__user__.name,user_image=request.__user__.image,content=content)
+	await comment.save()
+	return comment
+
+#根据博客ID返回博客
+@get('/api/blogs/{id}')
+async def api_get_blog(*,id):
+	blog = await Blog.find(id)
+	return blog
+
+#取出数据填充分页管理博客界面
+@get('/api/blogs')
+async def api_blogs(*,page = '1'):
+	page_index = get_page_index(page)
+	#博客总数
+	num = await Blog.findNumber('count(id)')
+	p = Page(num,page_index)
+	if num == 0:
+		return dict(page = p,blogs = ())
+	blogs = await Blog.findAll(orderBy='created_at',limit=(p.offset,p.limit))
+	return dict(page = p,blogs = blogs)
+
+#取出数据填充分页管理用户界面
+@get('/api/comments')
+async def api_comments(*,page='1'):
+	page_index = get_page_index(page)
+	num = await Comment.findNumber('count(id)')
+	p = Page(num,page_index)
+	if num == 0:
+		return dict(page=p,comments=())
+	comments = await Comment.findAll(orderBy='blog_id',limit=(p.offset,p.limit))
+	return dict(page=p,comments=comments)
+
+#删除评论页面
+@post('/api/comments/{comment_id}/delete')
+async def delete_comments(comment_id,request):
+	check_admin(request)
+	comments = await Comment.findAll('id=%s',[comment_id])
+	if len(comments) == 0:
+		return None
+	comment = comments[0]
+	await comment.delete()
+	return dict(id=comment_id)
+
+#取出数据填充分页管理用户界面
+@get('/api/users')
+async def api_users(*,page='1'):
+	page_index = get_page_index(page)
+	num = await User.findNumber('count(id)')
+	p = Page(num,page_index)
+	if num == 0:
+		return dict(page=p,users = ())
+	users = await User.findAll(orderBy='created_at',limit=(p.offset,p.limit))
+	return dict(page=p,users=users)
